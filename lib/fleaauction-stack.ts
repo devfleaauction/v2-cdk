@@ -1,26 +1,24 @@
 //**------------------------------------------------------------------------**//
 
-// import * as cdk from 'aws-cdk-lib'
-// import * as ec2 from 'aws-cdk-lib/aws-ec2'
-// import * as rds from 'aws-cdk-lib/aws-rds'
-// import * as sm from 'aws-cdk-lib/aws-secretsmanager'
-// import * as ecr from 'aws-cdk-lib/aws-ecr'
-// import * as ecs from 'aws-cdk-lib/aws-ecs'
-// import * as elasticache from 'aws-cdk-lib/aws-elasticache'
-// import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2'
-// import * as iam from 'aws-cdk-lib/aws-iam'
-
 import * as cdk from 'aws-cdk-lib'
+import * as cm from 'aws-cdk-lib/aws-certificatemanager'
 import * as ec2 from 'aws-cdk-lib/aws-ec2'
 import * as ecr from 'aws-cdk-lib/aws-ecr'
+import * as ecs from 'aws-cdk-lib/aws-ecs'
 import * as elasticache from 'aws-cdk-lib/aws-elasticache'
+import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2'
+import * as iam from 'aws-cdk-lib/aws-iam'
 import * as rds from 'aws-cdk-lib/aws-rds'
+import * as dns from 'aws-cdk-lib/aws-route53'
 import * as sm from 'aws-cdk-lib/aws-secretsmanager'
+
 import { Construct } from 'constructs'
 
 export class FleaauctionStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props)
+
+    const defaultPort = 3001
 
     //**------------------------------------------------------------------------**//
     //** VPC
@@ -151,102 +149,173 @@ export class FleaauctionStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     })
 
-    // // ECS cluster
-    // const cluster = new ecs.Cluster(this, 'fa-v2-ecs-cluster', {
-    //   vpc: vpc,
-    // })
+    //!!--------------------------------------------------------------------------//
 
-    // // Task
-    // const fargateTaskDefinition = new ecs.FargateTaskDefinition(
-    //   this,
-    //   'ApiTaskDefinition',
-    //   {
-    //     memoryLimitMiB: 512,
-    //     cpu: 256,
-    //   }
-    // )
-    // // IAM Policy
-    // const executionRolePolicy = new iam.PolicyStatement({
+    //**------------------------------------------------------------------------**//
+    //** ECS cluster
+    //**------------------------------------------------------------------------**//
+    const cluster = new ecs.Cluster(this, 'fa-v2-ecs-cluster', {
+      vpc,
+      clusterName: 'fa-v2-ecs-cluster',
+      containerInsights: true,
+    })
+
+    //**------------------------------------------------------------------------**//
+    //** ECS task
+    //**------------------------------------------------------------------------**//
+    const fargateTask = new ecs.FargateTaskDefinition(this, 'fa-v2-task', {
+      cpu: 256,
+      memoryLimitMiB: 512,
+      runtimePlatform: {
+        operatingSystemFamily: ecs.OperatingSystemFamily.LINUX,
+      },
+    })
+
+    //** ref) https://stackoverflow.com/questions/48999472/difference-between-aws-elastic-container-services-ecs-executionrole-and-taskr
+    //**
+    //** `Execution Role` is the IAM role that executes ECS actions such as
+    //** - pulling an image from ECR
+    //** - storing logs in Cloudwatch
+    //**
+    const executionRolePolicy = new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      resources: ['*'],
+      actions: [
+        'ecr:GetAuthorizationToken',
+        'ecr:BatchCheckLayerAvailability',
+        'ecr:GetDownloadUrlForLayer',
+        'ecr:BatchGetImage',
+        'logs:CreateLogStream',
+        'logs:PutLogEvents',
+      ],
+    })
+    //** `Task Role` is specific capabilities within the task itself when your actual code runs.
+    //** 예를 들어, 아래의 서비스 같은 것들은 특정 테이블 접근을 위해서 해당 권한이 있는 IAM policy 가 필요.
+    //** - S3
+    //** - SQS
+    //** - DynamoDB, etc.
+    // const taskRolePolicy = new iam.PolicyStatement({
     //   effect: iam.Effect.ALLOW,
-    //   resources: ['*'],
-    //   actions: [
-    //     'ecr:GetAuthorizationToken',
-    //     'ecr:BatchCheckLayerAvailability',
-    //     'ecr:GetDownloadUrlForLayer',
-    //     'ecr:BatchGetImage',
-    //     'logs:CreateLogStream',
-    //     'logs:PutLogEvents',
-    //   ],
-    // })
-    // // const taskRolePolicy = new iam.PolicyStatement({
-    // //   effect: iam.Effect.ALLOW,
-    // //   resources: [table.tableArn],
-    // //   actions: ['dynamodb:*'],
-    // // })
-
-    // fargateTaskDefinition.addToExecutionRolePolicy(executionRolePolicy)
-    // // fargateTaskDefinition.addToTaskRolePolicy(taskRolePolicy)
-
-    // // Container
-    // const container = fargateTaskDefinition.addContainer('fa-v2-api', {
-    //   image: ecs.ContainerImage.fromRegistry(repository.repositoryUri),
-    //   logging: ecs.LogDrivers.awsLogs({ streamPrefix: 'fa-v2-api' }),
-    //   environment: {
-    //     APP_ID: 'fa-v2-api',
-    //     REDIS_HOST: redisCluster.attrRedisEndpointAddress,
-    //     REDIS_PORT: redisCluster.attrRedisEndpointPort,
-    //     MYSQL_HOST: dbInstance.dbInstanceEndpointAddress,
-    //     MYSQL_PORT: dbInstance.dbInstanceEndpointPort,
-    //     //MYSQL_PASSWORD: dbPassword,
-    //   },
-    //   // ... other options here ...
-    // })
-    // container.addPortMappings({
-    //   containerPort: 3000,
-    //   hostPort: 3000,
+    //   resources: [table.tableArn],
+    //   actions: ['dynamodb:*'],
     // })
 
-    // // Service
-    // const serviceSg = new ec2.SecurityGroup(this, 'fa-v2-service-sg', {
-    //   vpc: vpc,
-    // })
-    // serviceSg.addIngressRule(ec2.Peer.ipv4('0.0.0.0/0'), ec2.Port.tcp(3000))
+    fargateTask.addToExecutionRolePolicy(executionRolePolicy)
+    // fargateTask.addToTaskRolePolicy(taskRolePolicy)
 
-    // const service = new ecs.FargateService(this, 'fa-v2-service', {
-    //   cluster,
-    //   taskDefinition: fargateTaskDefinition,
-    //   desiredCount: 1,
-    //   assignPublicIp: false,
-    //   securityGroups: [serviceSg],
-    // })
+    //**------------------------------------------------------------------------**//
+    //** ECS Container
+    //**------------------------------------------------------------------------**//
+    const container = fargateTask.addContainer('fa-v2-api', {
+      environment: {
+        ENV: 'dev',
+        REDIS_HOST: redisCluster.attrRedisEndpointAddress,
+        REDIS_PORT: redisCluster.attrRedisEndpointPort,
+        MYSQL_HOST: dbInstance.dbInstanceEndpointAddress,
+        MYSQL_PORT: dbInstance.dbInstanceEndpointPort,
+        MYSQL_SECRETS_ARN: dbInstance.secret!.secretArn,
+      },
+      image: ecs.ContainerImage.fromRegistry(repository.repositoryUri),
+      logging: ecs.LogDrivers.awsLogs({ streamPrefix: 'fa-v2-api' }),
+    })
+    container.addPortMappings({
+      containerPort: defaultPort,
+      hostPort: defaultPort,
+    })
 
-    // // Setup AutoScaling policy
-    // const scaling = service.autoScaleTaskCount({
-    //   maxCapacity: 4,
-    //   minCapacity: 1,
-    // })
-    // scaling.scaleOnCpuUtilization('CpuScaling', {
-    //   targetUtilizationPercent: 50,
-    //   scaleInCooldown: cdk.Duration.seconds(60),
-    //   scaleOutCooldown: cdk.Duration.seconds(60),
-    // })
+    //**------------------------------------------------------------------------**//
+    //** ALB
+    //**------------------------------------------------------------------------**//
+    const hostedZone = dns.HostedZone.fromHostedZoneAttributes(
+      this,
+      'fa-v2-hz',
+      {
+        zoneName: 'fleaauction.world',
+        hostedZoneId: 'Z08193362JY5ZYEXTSKLM',
+      }
+    )
+    const cert = new cm.Certificate(this, 'fa-v2-certificate', {
+      domainName: 'dev.fleaauction.world',
+      validation: cm.CertificateValidation.fromDns(hostedZone),
+    })
+    const albSg = new ec2.SecurityGroup(this, 'fa-v2-alb-sg', {
+      vpc,
+    })
+    albSg.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(443))
+    const targetGroup = new elbv2.ApplicationTargetGroup(this, 'fa-v2-alb-tg', {
+      vpc,
+      port: defaultPort,
+      protocol: elbv2.ApplicationProtocol.HTTP,
+      targetType: elbv2.TargetType.IP,
+      healthCheck: {
+        path: '/',
+        healthyHttpCodes: '200',
+      },
+    })
+    const alb = new elbv2.ApplicationLoadBalancer(this, 'fa-v2-alb', {
+      vpc,
+      deletionProtection: false,
+      idleTimeout: cdk.Duration.minutes(10),
+      internetFacing: true,
+      http2Enabled: false,
+      loadBalancerName: 'fa-v2-alb',
+      securityGroup: albSg,
+    })
+    const httpListener = alb.addListener('fa-v2-alb-http-listener', {
+      port: 80,
+      open: true,
+      defaultAction: elbv2.ListenerAction.redirect({
+        port: '443',
+        protocol: elbv2.ApplicationProtocol.HTTPS,
+      }),
+    })
+    const httpsListener = alb.addListener('fa-v2-alb-https-listner', {
+      port: 443,
+      sslPolicy: elbv2.SslPolicy.RECOMMENDED,
+      certificates: [cert],
+    })
+    httpsListener.addTargetGroups('fa-v2-alb-https-tg', {
+      targetGroups: [targetGroup],
+    })
+    new dns.ARecord(this, 'fa-v2-dns-record', {
+      zone: hostedZone,
+      recordName: 'dev.fleaauction.world',
+      target: dns.RecordTarget.fromAlias(
+        new cdk.aws_route53_targets.LoadBalancerTarget(alb)
+      ),
+    })
 
-    // // ALB
-    // const lb = new elbv2.ApplicationLoadBalancer(this, 'fa-v2-lb', {
-    //   vpc,
-    //   internetFacing: true,
-    // })
-    // const listener = lb.addListener('Listener', {
-    //   port: 80,
-    // })
-    // listener.addTargets('Target', {
-    //   port: 80,
-    //   targets: [service],
-    //   healthCheck: { path: '/' },
-    // })
-    // listener.connections.allowDefaultPortFromAnyIpv4('Open to the world')
+    //**------------------------------------------------------------------------**//
+    //** ECS Service
+    //**------------------------------------------------------------------------**//
+    const serviceSg = new ec2.SecurityGroup(this, 'fa-v2-service-sg', {
+      vpc,
+      allowAllOutbound: true,
+    })
+    serviceSg.addIngressRule(
+      ec2.Peer.securityGroupId(albSg.securityGroupId),
+      ec2.Port.tcp(defaultPort)
+    )
+    const service = new ecs.FargateService(this, 'fa-v2-service', {
+      cluster,
+      assignPublicIp: false,
+      desiredCount: 1,
+      securityGroups: [serviceSg],
+      serviceName: 'fa-v2-service',
+      taskDefinition: fargateTask,
+    })
+    const scaling = service.autoScaleTaskCount({
+      maxCapacity: 4,
+      minCapacity: 1,
+    })
+    scaling.scaleOnCpuUtilization('fa-v2-servie-scaling', {
+      targetUtilizationPercent: 50,
+      scaleInCooldown: cdk.Duration.seconds(60),
+      scaleOutCooldown: cdk.Duration.seconds(60),
+    })
+    service.attachToApplicationTargetGroup(targetGroup)
 
-    // Code repository
+    // // Code repository
     // const code = new codecommit.Repository(this, 'Repository', {
     //   repositoryName: 'msg-app-backend',
     //   description: 'Node.js backend.',
