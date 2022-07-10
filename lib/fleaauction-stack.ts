@@ -130,10 +130,10 @@ export class FleaauctionStack extends cdk.Stack {
         }).subnetIds,
       }
     )
-    const redisCluster = new elasticache.CfnCacheCluster(this, 'fa-v2-redis', {
+    const redisCluster = new elasticache.CfnCacheCluster(this, 'fa-v2-redis-dev', {
       cacheNodeType: 'cache.t3.micro',
       cacheSubnetGroupName: redisSubnet.ref,
-      clusterName: 'fa-v2-redis',
+      clusterName: 'fa-v2-redis-dev',
       engine: 'redis',
       engineVersion: '6.x',
       numCacheNodes: 1,
@@ -154,16 +154,16 @@ export class FleaauctionStack extends cdk.Stack {
     //**------------------------------------------------------------------------**//
     //** ECS cluster
     //**------------------------------------------------------------------------**//
-    const cluster = new ecs.Cluster(this, 'fa-v2-ecs-cluster', {
+    const cluster = new ecs.Cluster(this, 'fa-v2-dev-cluster', {
       vpc,
-      clusterName: 'fa-v2-ecs-cluster',
+      clusterName: 'fa-v2-dev-cluster',
       containerInsights: true,
     })
 
     //**------------------------------------------------------------------------**//
     //** ECS task
     //**------------------------------------------------------------------------**//
-    const fargateTask = new ecs.FargateTaskDefinition(this, 'fa-v2-task', {
+    const fargateTask = new ecs.FargateTaskDefinition(this, 'fa-v2-api-task', {
       cpu: 256,
       memoryLimitMiB: 512,
       runtimePlatform: {
@@ -215,7 +215,9 @@ export class FleaauctionStack extends cdk.Stack {
         MYSQL_PORT: dbInstance.dbInstanceEndpointPort,
         MYSQL_SECRETS_ARN: dbInstance.secret!.secretArn,
       },
-      image: ecs.ContainerImage.fromRegistry(repository.repositoryUri),
+      // image: ecs.ContainerImage.fromRegistry(repository.repositoryUri),
+      image: ecs.EcrImage.fromEcrRepository(repository),
+      // image: ecs.ContainerImage.fromRegistry(repository.repositoryUri),
       logging: ecs.LogDrivers.awsLogs({ streamPrefix: 'fa-v2-api' }),
     })
     container.addPortMappings({
@@ -288,7 +290,7 @@ export class FleaauctionStack extends cdk.Stack {
     //**------------------------------------------------------------------------**//
     //** ECS Service
     //**------------------------------------------------------------------------**//
-    const serviceSg = new ec2.SecurityGroup(this, 'fa-v2-service-sg', {
+    const serviceSg = new ec2.SecurityGroup(this, 'fa-v2-api-sg', {
       vpc,
       allowAllOutbound: true,
     })
@@ -296,20 +298,20 @@ export class FleaauctionStack extends cdk.Stack {
       ec2.Peer.securityGroupId(albSg.securityGroupId),
       ec2.Port.tcp(defaultPort)
     )
-    const service = new ecs.FargateService(this, 'fa-v2-service', {
+    const service = new ecs.FargateService(this, 'fa-v2-api', {
       cluster,
       assignPublicIp: false,
       desiredCount: 1,
       securityGroups: [serviceSg],
-      serviceName: 'fa-v2-service',
+      serviceName: 'fa-v2-api',
       taskDefinition: fargateTask,
     })
     const scaling = service.autoScaleTaskCount({
       maxCapacity: 4,
       minCapacity: 1,
     })
-    scaling.scaleOnCpuUtilization('fa-v2-servie-scaling', {
-      targetUtilizationPercent: 50,
+    scaling.scaleOnCpuUtilization('fa-v2-api-scaling', {
+      targetUtilizationPercent: 60,
       scaleInCooldown: cdk.Duration.seconds(60),
       scaleOutCooldown: cdk.Duration.seconds(60),
     })
