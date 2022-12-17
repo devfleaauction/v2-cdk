@@ -1,7 +1,7 @@
 //**------------------------------------------------------------------------**//
 
 import * as cdk from 'aws-cdk-lib'
-import * as broker from 'aws-cdk-lib/aws-amazonmq'
+import * as amq from 'aws-cdk-lib/aws-amazonmq'
 import * as cm from 'aws-cdk-lib/aws-certificatemanager'
 import * as ec2 from 'aws-cdk-lib/aws-ec2'
 import * as ecr from 'aws-cdk-lib/aws-ecr'
@@ -15,7 +15,7 @@ import * as dns from 'aws-cdk-lib/aws-route53'
 import * as sm from 'aws-cdk-lib/aws-secretsmanager'
 import { Construct } from 'constructs'
 
-export class FleaauctionStack extends cdk.Stack {
+export class ProdStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props)
 
@@ -23,22 +23,26 @@ export class FleaauctionStack extends cdk.Stack {
     //!! CHAPTER 1/3
     //!!--------------------------------------------------------------------------//
 
-    const env = 'dev'
+    const prefix = 'prod'
     const defaultPort = 3001
 
     //**------------------------------------------------------------------------**//
     //** VPC
     //**------------------------------------------------------------------------**//
-    const vpc = new ec2.Vpc(this, `fav2-${env}-vpc`, {
-      cidr: '10.1.0.0/16',
+    const vpc = new ec2.Vpc(this, `${prefix}-vpc`, {
+      ipAddresses: ec2.IpAddresses.cidr('10.10.0.0/16'),
       maxAzs: 2,
       natGateways: 1,
       subnetConfiguration: [
-        { cidrMask: 24, subnetType: ec2.SubnetType.PUBLIC, name: 'Public' },
         {
           cidrMask: 24,
-          subnetType: ec2.SubnetType.PRIVATE_WITH_NAT,
-          name: 'Private',
+          subnetType: ec2.SubnetType.PUBLIC,
+          name: `${prefix}-publicSN`,
+        },
+        {
+          cidrMask: 24,
+          subnetType: ec2.SubnetType.PRIVATE_ISOLATED,
+          name: `${prefix}-privateSN`,
         },
       ],
     })
@@ -46,8 +50,8 @@ export class FleaauctionStack extends cdk.Stack {
     //**------------------------------------------------------------------------**//
     //** RDS instance
     //**------------------------------------------------------------------------**//
-    const dbSecret = new sm.Secret(this, `fav2-${env}-db-secret`, {
-      secretName: `fav2/${env}/mysql`, // to specify the name explicitly
+    const dbSecret = new sm.Secret(this, `${prefix}-dbSecret`, {
+      secretName: `prod/aurora/mysql`, // to specify the name explicitly
       generateSecretString: {
         excludeCharacters: ' %+~`#$&*()|[]{}:;<>?!\'/@"\\',
         generateStringKey: 'password',
@@ -56,61 +60,70 @@ export class FleaauctionStack extends cdk.Stack {
       },
     })
     const dbCredentials = rds.Credentials.fromSecret(dbSecret, 'admin')
-    const dbSg = new ec2.SecurityGroup(this, `fav2-${env}-mysql-sg`, {
+    const dbSecurityGroup = new ec2.SecurityGroup(this, `${prefix}-auroraSG`, {
       vpc,
       allowAllOutbound: true,
-      description: 'MySQL security group',
-      securityGroupName: `fav2-${env}-mysql-sg`,
+      description: 'MySQL/Aurora security group',
+      securityGroupName: `${prefix}-auroraSG`,
     })
-    dbSg.addIngressRule(dbSg, ec2.Port.allTraffic(), 'traffic from self')
-    dbSg.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(3306), 'MySQL')
-    const dbInstance = new rds.DatabaseInstance(this, `fav2-${env}-mysql`, {
-      vpc,
-      vpcSubnets: {
-        subnetType: ec2.SubnetType.PRIVATE_WITH_NAT,
-      },
-      allocatedStorage: 20,
-      allowMajorVersionUpgrade: false,
-      autoMinorVersionUpgrade: true,
-      backupRetention: cdk.Duration.days(7),
-      credentials: dbCredentials,
-      databaseName: 'gangnam',
-      deleteAutomatedBackups: true,
-      engine: rds.DatabaseInstanceEngine.mysql({
-        version: rds.MysqlEngineVersion.VER_8_0_28,
+    dbSecurityGroup.addIngressRule(
+      dbSecurityGroup,
+      ec2.Port.allTraffic(),
+      'traffic from self'
+    )
+    dbSecurityGroup.addIngressRule(
+      ec2.Peer.anyIpv4(),
+      ec2.Port.tcp(3306),
+      'MySQL'
+    )
+    const auroraCluster = new rds.DatabaseCluster(this, `${prefix}-aurora`, {
+      engine: rds.DatabaseClusterEngine.auroraMysql({
+        version: rds.AuroraMysqlEngineVersion.VER_3_02_0,
       }),
-      instanceIdentifier: `fav2-${env}-mysql`,
-      instanceType: ec2.InstanceType.of(
-        ec2.InstanceClass.T3,
-        ec2.InstanceSize.SMALL
-      ),
-      multiAz: false,
-      publiclyAccessible: false,
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
-      securityGroups: [dbSg],
+      credentials: dbCredentials,
+      instanceProps: {
+        instanceType: ec2.InstanceType.of(
+          ec2.InstanceClass.T4G,
+          ec2.InstanceSize.MEDIUM
+        ),
+        vpc: vpc,
+        vpcSubnets: {
+          subnetType: ec2.SubnetType.PRIVATE_ISOLATED,
+        },
+        securityGroups: [dbSecurityGroup],
+        publiclyAccessible: false,
+        deleteAutomatedBackups: true,
+      },
+      clusterIdentifier: `${prefix}-aurora`,
+      defaultDatabaseName: 'gangnam',
+      instances: 2,
+      backup: {
+        retention: cdk.Duration.days(7),
+        preferredWindow: '18:00-19:00',
+      },
     })
-    new cdk.CfnOutput(this, 'dbEndpointAddress', {
-      value: dbInstance.dbInstanceEndpointAddress,
-    })
-    new cdk.CfnOutput(this, 'dbSecretArn', {
-      value: dbInstance.secret!.secretArn,
-    })
+    // new cdk.CfnOutput(this, 'dbEndpointAddress', {
+    //   value: dbInstance.dbInstanceEndpointAddress,
+    // })
+    // new cdk.CfnOutput(this, 'dbSecretArn', {
+    //   value: dbInstance.secret!.secretArn,
+    // })
 
     //**------------------------------------------------------------------------**//
     //** Bastion Host (will work regardless of environment)
     //** - ssh tunneling for database client
     //** - ssh tunneling for rabbitmq console
     //**------------------------------------------------------------------------**//
-    const bastionSg = new ec2.SecurityGroup(this, `fav2-bastion-sg`, {
+    const bastionSg = new ec2.SecurityGroup(this, `${prefix}-bastionSG`, {
       vpc,
       allowAllOutbound: true,
-      description: 'bastion host security group',
-      securityGroupName: `fav2-bastion-sg`,
+      description: 'bastion security group',
+      securityGroupName: `${prefix}-bastionSG`,
     })
     bastionSg.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(22), 'SSH')
-    const bastion = new ec2.BastionHostLinux(this, 'fav2-bastion', {
+    const bastion = new ec2.BastionHostLinux(this, `${prefix}-bastion`, {
       vpc,
-      instanceName: 'fav2-bastion',
+      instanceName: `${prefix}-bastion`,
       securityGroup: bastionSg,
       subnetSelection: {
         subnetType: ec2.SubnetType.PUBLIC,
@@ -120,31 +133,31 @@ export class FleaauctionStack extends cdk.Stack {
     //**------------------------------------------------------------------------**//
     //** Redis
     //**------------------------------------------------------------------------**//
-    const redisSg = new ec2.SecurityGroup(this, `fav2-${env}-redis-sg`, {
+    const redisSg = new ec2.SecurityGroup(this, `${prefix}-redisSG`, {
       vpc,
       allowAllOutbound: true,
       description: 'Redis security group',
-      securityGroupName: `fav2-${env}-redis-sg`,
+      securityGroupName: `${prefix}-redisSG`,
     })
-    redisSg.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(6379), 'Redis')
+    redisSg.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(6379), 'redis')
     const redisSubnet = new elasticache.CfnSubnetGroup(
       this,
-      `fav2-${env}-redis-subnet`,
+      `${prefix}-redisSN`,
       {
-        cacheSubnetGroupName: `fav2-${env}-redis-subnet`,
-        description: `Redis subnet group`,
+        cacheSubnetGroupName: `${prefix}-redisSN`,
+        description: `redis subnet group`,
         subnetIds: vpc.selectSubnets({
-          subnetType: ec2.SubnetType.PRIVATE_WITH_NAT,
+          subnetType: ec2.SubnetType.PRIVATE_ISOLATED,
         }).subnetIds,
       }
     )
     const redisCluster = new elasticache.CfnCacheCluster(
       this,
-      `fav2-${env}-redis`,
+      `${prefix}-redis`,
       {
         cacheNodeType: 'cache.t3.micro',
         cacheSubnetGroupName: redisSubnet.ref,
-        clusterName: `fav2-${env}-redis`,
+        clusterName: `${prefix}-redis`,
         engine: 'redis',
         engineVersion: '6.x',
         numCacheNodes: 1,
@@ -155,24 +168,25 @@ export class FleaauctionStack extends cdk.Stack {
     //**------------------------------------------------------------------------**//
     //** RabbitMQ
     //**------------------------------------------------------------------------**//
-    const rmqSg = new ec2.SecurityGroup(this, `fav2-${env}-rmq-sg`, {
+    const rmqSecurityGroup = new ec2.SecurityGroup(this, `${prefix}-rmqSG`, {
       vpc,
       allowAllOutbound: true,
-      securityGroupName: `fav2-${env}-rmq-sg`,
+      securityGroupName: `${prefix}-rmqSG`,
     })
-    rmqSg.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(443))
-    rmqSg.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(5671))
-    rmqSg.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(15671))
+    rmqSecurityGroup.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(443))
+    rmqSecurityGroup.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(5671))
+    rmqSecurityGroup.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(15671))
     const privateSubnet = vpc.selectSubnets({
-      subnetType: ec2.SubnetType.PRIVATE_WITH_NAT,
+      subnetType: ec2.SubnetType.PRIVATE_ISOLATED,
     })
-    const rabbitMq = new broker.CfnBroker(this, `fav2-${env}-queue`, {
+
+    const rabbitMq = new amq.CfnBroker(this, `${prefix}-rmq`, {
       autoMinorVersionUpgrade: true,
-      brokerName: `fav2-${env}-queue`,
+      brokerName: `${prefix}-rmq`,
       engineType: 'RABBITMQ',
-      engineVersion: '3.9.16',
+      engineVersion: '3.10.10',
       deploymentMode: 'SINGLE_INSTANCE',
-      hostInstanceType: 'mq.t3.micro',
+      hostInstanceType: 'mq.m5.large',
       publiclyAccessible: false,
       users: [
         {
@@ -181,21 +195,15 @@ export class FleaauctionStack extends cdk.Stack {
           consoleAccess: true,
         },
       ],
-      securityGroups: [rmqSg.securityGroupId],
+      securityGroups: [rmqSecurityGroup.securityGroupId],
       subnetIds: [privateSubnet.subnetIds[0]],
-    })
-    new cdk.CfnOutput(this, 'rabbitBrokerName', {
-      value: rabbitMq.brokerName,
-    })
-    new cdk.CfnOutput(this, 'rabbitEndpoint', {
-      value: cdk.Fn.select(0, rabbitMq.attrAmqpEndpoints),
     })
 
     //**------------------------------------------------------------------------**//
     //** ECR (will work regardless of environment)
     //**------------------------------------------------------------------------**//
-    const repository = new ecr.Repository(this, 'fav2-api', {
-      repositoryName: 'fav2-api',
+    const repository = new ecr.Repository(this, 'fleaauction-api', {
+      repositoryName: 'fleaauction-api',
       imageScanOnPush: false,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     })
@@ -207,9 +215,9 @@ export class FleaauctionStack extends cdk.Stack {
     //**------------------------------------------------------------------------**//
     //** ECS cluster
     //**------------------------------------------------------------------------**//
-    const cluster = new ecs.Cluster(this, `fav2-${env}-cluster`, {
+    const cluster = new ecs.Cluster(this, `${prefix}-apiCluster`, {
       vpc,
-      clusterName: `fav2-${env}-cluster`,
+      clusterName: `${prefix}-apiCluster`,
       containerInsights: true,
     })
 
@@ -218,7 +226,7 @@ export class FleaauctionStack extends cdk.Stack {
     //**------------------------------------------------------------------------**//
     const fargateTask = new ecs.FargateTaskDefinition(
       this,
-      `fav2-${env}-api-task`,
+      `${prefix}-apiTask`,
       {
         cpu: 256,
         memoryLimitMiB: 512,
@@ -252,36 +260,34 @@ export class FleaauctionStack extends cdk.Stack {
     //** - S3
     //** - SQS
     //** - DynamoDB, etc.
-    // const taskRolePolicy = new iam.PolicyStatement({
-    //   effect: iam.Effect.ALLOW,
-    //   resources: [table.tableArn],
-    //   actions: ['dynamodb:*'],
-    // })
+    const taskRolePolicy = new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      resources: ['arn:aws:s3:::auction-uploads/*'],
+      actions: ['s3:*'],
+    })
 
+    fargateTask.addToTaskRolePolicy(taskRolePolicy)
     fargateTask.addToExecutionRolePolicy(executionRolePolicy)
-    // fargateTask.addToTaskRolePolicy(taskRolePolicy)
 
     //**------------------------------------------------------------------------**//
     //** ECS Container
     //**------------------------------------------------------------------------**//
-    const logGroup = new logs.LogGroup(this, `fav2-${env}-api-log`, {
-      logGroupName: '/ecs/FleaauctionStackfav2devapitask',
+    const logGroup = new logs.LogGroup(this, `${prefix}-apiLog`, {
+      logGroupName: '/ecs/prodApi',
     })
-    const container = fargateTask.addContainer(`fav2-${env}-api-container`, {
+    const container = fargateTask.addContainer(`${prefix}-apiContainer`, {
       environment: {
-        API_ENV: env,
+        MYSQL_SECRETS_ARN: auroraCluster.secret!.secretArn,
+        NODE_ENV: 'prod',
         RABBITMQ_HOST: cdk.Fn.select(0, rabbitMq.attrAmqpEndpoints),
         RABBITMQ_QUEUE: rabbitMq.brokerName,
         REDIS_HOST: redisCluster.attrRedisEndpointAddress,
         REDIS_PORT: redisCluster.attrRedisEndpointPort,
-        MYSQL_HOST: dbInstance.dbInstanceEndpointAddress,
-        MYSQL_PORT: dbInstance.dbInstanceEndpointPort,
-        MYSQL_SECRETS_ARN: dbInstance.secret!.secretArn,
       },
       image: ecs.EcrImage.fromEcrRepository(repository),
       // image: ecs.ContainerImage.fromRegistry(repository.repositoryUri),
       logging: ecs.LogDrivers.awsLogs({
-        streamPrefix: `fav2-${env}-api`,
+        streamPrefix: `ecs`,
         logGroup,
       }),
     })
@@ -295,24 +301,24 @@ export class FleaauctionStack extends cdk.Stack {
     //**------------------------------------------------------------------------**//
     const hostedZone = dns.HostedZone.fromHostedZoneAttributes(
       this,
-      'fav2-hosted-zone',
+      `${prefix}-hostZone`,
       {
         zoneName: 'fleaauction.world',
         hostedZoneId: 'Z08193362JY5ZYEXTSKLM',
       }
     )
-    const cert = new cm.Certificate(this, 'fav2-certificate', {
-      domainName: 'dev.fleaauction.world',
+    const cert = new cm.Certificate(this, `${prefix}-cert`, {
+      domainName: 'api.fleaauction.world',
       validation: cm.CertificateValidation.fromDns(hostedZone),
     })
 
-    const albSg = new ec2.SecurityGroup(this, `fav2-${env}-alb-sg`, {
+    const albSg = new ec2.SecurityGroup(this, `${prefix}-albSG`, {
       vpc,
     })
     albSg.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(443))
     const targetGroup = new elbv2.ApplicationTargetGroup(
       this,
-      `fav2-${env}-alb-tg`,
+      `${prefix}-albTG`,
       {
         vpc,
         port: defaultPort,
@@ -324,16 +330,16 @@ export class FleaauctionStack extends cdk.Stack {
         },
       }
     )
-    const alb = new elbv2.ApplicationLoadBalancer(this, `fav2-${env}-alb`, {
+    const alb = new elbv2.ApplicationLoadBalancer(this, `${prefix}-alb`, {
       vpc,
       deletionProtection: false,
       idleTimeout: cdk.Duration.minutes(10),
       internetFacing: true,
       http2Enabled: false,
-      loadBalancerName: `fav2-${env}-alb`,
+      loadBalancerName: `${prefix}-alb`,
       securityGroup: albSg,
     })
-    const httpListener = alb.addListener(`fav2-${env}-http-listener`, {
+    const httpListener = alb.addListener(`${prefix}-httpListener`, {
       port: 80,
       open: true,
       defaultAction: elbv2.ListenerAction.redirect({
@@ -341,17 +347,17 @@ export class FleaauctionStack extends cdk.Stack {
         protocol: elbv2.ApplicationProtocol.HTTPS,
       }),
     })
-    const httpsListener = alb.addListener(`fav2-${env}-https-listner`, {
+    const httpsListener = alb.addListener(`${prefix}-httpsListner`, {
       port: 443,
       sslPolicy: elbv2.SslPolicy.RECOMMENDED,
       certificates: [cert],
     })
-    httpsListener.addTargetGroups(`fav2-${env}-https-tg`, {
+    httpsListener.addTargetGroups(`${prefix}-albTG`, {
       targetGroups: [targetGroup],
     })
-    new dns.ARecord(this, 'fav2-dns-record', {
+    new dns.ARecord(this, `${prefix}-dnsRecord`, {
       zone: hostedZone,
-      recordName: 'dev.fleaauction.world',
+      recordName: 'api.fleaauction.world',
       target: dns.RecordTarget.fromAlias(
         new cdk.aws_route53_targets.LoadBalancerTarget(alb)
       ),
@@ -360,28 +366,28 @@ export class FleaauctionStack extends cdk.Stack {
     //**------------------------------------------------------------------------**//
     //** ECS Service
     //**------------------------------------------------------------------------**//
-    const serviceSg = new ec2.SecurityGroup(this, `fav2-${env}-api-sg`, {
+    const apiSrvSg = new ec2.SecurityGroup(this, `${prefix}-apiSrvSG`, {
       vpc,
       allowAllOutbound: true,
     })
-    serviceSg.addIngressRule(
+    apiSrvSg.addIngressRule(
       ec2.Peer.securityGroupId(albSg.securityGroupId),
       ec2.Port.tcp(defaultPort)
     )
-    const service = new ecs.FargateService(this, `fav2-${env}-api-svc`, {
+    const service = new ecs.FargateService(this, `${prefix}-apiSvc`, {
       cluster,
       assignPublicIp: false,
       desiredCount: 1,
-      securityGroups: [serviceSg],
-      serviceName: `fav2-${env}-api-svc`,
+      securityGroups: [apiSrvSg],
+      serviceName: `${prefix}-apiSvc`,
       taskDefinition: fargateTask,
     })
     const scaling = service.autoScaleTaskCount({
-      maxCapacity: 4,
+      maxCapacity: 6,
       minCapacity: 1,
     })
-    scaling.scaleOnCpuUtilization(`fav2-${env}-api-scaling`, {
-      targetUtilizationPercent: 69,
+    scaling.scaleOnCpuUtilization(`${prefix}-scalingPolicy`, {
+      targetUtilizationPercent: 70,
       scaleInCooldown: cdk.Duration.seconds(60),
       scaleOutCooldown: cdk.Duration.seconds(60),
     })
